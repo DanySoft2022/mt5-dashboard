@@ -21,12 +21,13 @@
   const db = getDatabase(app);
 
   // ── Estado persistente ───────────────────────────────────
-  let cuentaActiva = localStorage.getItem("cuenta")    || null;
-  let periodo      = localStorage.getItem("periodo")   || "d30";
-  let filtroSym    = localStorage.getItem("filtroSym") || "TODOS";
+  let cuentaActiva  = localStorage.getItem("cuenta")    || null;
+  let periodo       = localStorage.getItem("periodo")   || "d30";
+  let filtroSym     = localStorage.getItem("filtroSym") || "TODOS";
+  let yaSubscripto  = false; // evita doble suscripción inicial
 
   let DB = {};
-  let unsubscribers = []; // listeners activos para poder desuscribirse al cambiar cuenta
+  let unsubscribers = [];
 
   // ── Helpers ──────────────────────────────────────────────
   const fmt    = (n,d=2) => n==null?"—":(parseFloat(n)>=0?"+":"")+parseFloat(n).toFixed(d);
@@ -79,8 +80,9 @@
     }
 
     const nueva = sel.value;
-    if (nueva && nueva !== cuentaActiva) {
+    if (nueva && (nueva !== cuentaActiva || !yaSubscripto)) {
       cuentaActiva = nueva;
+      yaSubscripto = true;
       localStorage.setItem("cuenta", nueva);
       suscribirCuenta(nueva);
     }
