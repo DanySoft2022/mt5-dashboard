@@ -7,7 +7,7 @@
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+  import { getDatabase, ref, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
   const app = initializeApp({
     apiKey: "AIzaSyDPeaLU5dCPmpxbR3648SXwR3p41oaAqaQ",
@@ -20,53 +20,110 @@
   });
   const db = getDatabase(app);
 
-  // ── Estado — persiste en localStorage ───────────────────
-  let periodo   = localStorage.getItem("periodo")   || "d30";
-  let filtroSym = localStorage.getItem("filtroSym") || "TODOS";
-  let DB = { cuenta:{}, posiciones:{}, estadisticas:{}, estadSim:{}, semanas:{}, historial:{}, capital:{} };
+  // ── Estado persistente ───────────────────────────────────
+  let cuentaActiva = localStorage.getItem("cuenta")    || null;
+  let periodo      = localStorage.getItem("periodo")   || "d30";
+  let filtroSym    = localStorage.getItem("filtroSym") || "TODOS";
 
+  let DB = {};
+  let unsubscribers = []; // listeners activos para poder desuscribirse al cambiar cuenta
+
+  // ── Helpers ──────────────────────────────────────────────
   const fmt    = (n,d=2) => n==null?"—":(parseFloat(n)>=0?"+":"")+parseFloat(n).toFixed(d);
   const fmtAbs = (n,d=2) => n==null?"—":parseFloat(n).toFixed(d);
   const col    = n => parseFloat(n)>=0?"#00e676":"#ff5252";
   const fmtT   = iso => new Date(iso).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit"});
-  // Debe coincidir exactamente con uploader Python:
-  // sym.replace("/","_").replace(" ","_").replace("(","").replace(")","")
   const symKey = s => s.replace(/\(/g,"").replace(/\)/g,"").replace(/[/ ]/g,"_");
   const $      = id => document.getElementById(id);
 
-  const CH = 210; // altura fija de todos los gráficos
-
-  // Layout base — siempre incluye height para que Plotly no colapse el div
+  const CH = 210;
   const BL = {
     paper_bgcolor:"transparent", plot_bgcolor:"transparent",
-    font:{color:"#888"}, height:CH,
-    margin:{t:10,b:40,l:55,r:15},
+    font:{color:"#888"}, height:CH, margin:{t:10,b:40,l:55,r:15},
     xaxis:{gridcolor:"#1e1e1e",color:"#555"},
     yaxis:{gridcolor:"#1e1e1e",color:"#555",zeroline:true,zerolinecolor:"#333"}
   };
   const PLOTCFG = {responsive:true, displayModeBar:false};
 
-  // Gráfico vacío con mensaje centrado (mantiene height)
-  function emptyChart(id, msg="Sin datos para este período") {
-    Plotly.react(id, [], {
-      ...BL,
-      annotations:[{
-        text:msg, x:0.5, y:0.5, xref:"paper", yref:"paper",
-        showarrow:false, font:{color:"#333", size:13}
-      }]
-    }, PLOTCFG);
+  function emptyChart(id, msg="Sin datos") {
+    Plotly.react(id,[],{...BL, annotations:[{
+      text:msg, x:0.5, y:0.5, xref:"paper", yref:"paper",
+      showarrow:false, font:{color:"#333",size:13}
+    }]}, PLOTCFG);
   }
 
-  // ── Firebase listeners ───────────────────────────────────
-  onValue(ref(db,"cuenta"),               s=>{ DB.cuenta=s.val()||{};      renderCuenta(); });
-  onValue(ref(db,"capital"),              s=>{ DB.capital=s.val()||{};     renderCapital(); });
-  onValue(ref(db,"posiciones"),           s=>{ DB.posiciones=s.val()||{};  renderPosiciones(); poblarFiltro(); });
-  onValue(ref(db,"estadisticas"),         s=>{ DB.estadisticas=s.val()||{};renderStats(); renderPatrimonio(); });
-  onValue(ref(db,"estadisticas_simbolos"),s=>{ DB.estadSim=s.val()||{};   renderStats(); renderPatrimonio(); renderPorSimbolo(); });
-  onValue(ref(db,"rendimiento_semanal"),  s=>{ DB.semanas=s.val()||{};    renderSemanal(); });
-  onValue(ref(db,"historial"),            s=>{ DB.historial=s.val()||{};  renderHistorial(); poblarFiltro(); });
+  // ── Listar cuentas disponibles ───────────────────────────
+  onValue(ref(db,"cuentas"), snap => {
+    const data = snap.val() || {};
+    const logins = Object.keys(data);
+    const sel = $("sel-cuenta");
+    const cur = cuentaActiva;
 
-  // ── CUENTA ──────────────────────────────────────────────
+    sel.innerHTML = logins.length === 0
+      ? `<option value="">Sin cuentas aún</option>`
+      : `<option value="">Seleccionar cuenta</option>`;
+
+    logins.forEach(login => {
+      const info = data[login]?.cuenta || {};
+      const o = document.createElement("option");
+      o.value = login;
+      o.textContent = `${login}${info.nombre ? " — "+info.nombre : ""}`;
+      sel.appendChild(o);
+    });
+
+    // Auto-seleccionar: restaurar guardada o primera disponible
+    if (cur && logins.includes(cur)) {
+      sel.value = cur;
+    } else if (logins.length > 0) {
+      sel.value = logins[0];
+    }
+
+    const nueva = sel.value;
+    if (nueva && nueva !== cuentaActiva) {
+      cuentaActiva = nueva;
+      localStorage.setItem("cuenta", nueva);
+      suscribirCuenta(nueva);
+    }
+  });
+
+  // ── Suscribir a los datos de una cuenta ─────────────────
+  function suscribirCuenta(login) {
+    // Cancelar listeners anteriores
+    unsubscribers.forEach(fn => fn());
+    unsubscribers = [];
+    DB = { cuenta:{}, capital:{}, posiciones:{}, estadisticas:{}, estadSim:{}, semanas:{}, historial:{} };
+    resetUI();
+
+    const base = `cuentas/${login}`;
+    const sub = (path, cb) => {
+      const r = ref(db, base+"/"+path);
+      const fn = onValue(r, cb);
+      unsubscribers.push(() => off(r));
+    };
+
+    sub("cuenta",               s=>{ DB.cuenta=s.val()||{};      renderCuenta(); });
+    sub("capital",              s=>{ DB.capital=s.val()||{};     renderCapital(); });
+    sub("posiciones",           s=>{ DB.posiciones=s.val()||{};  renderPosiciones(); poblarFiltroSym(); });
+    sub("estadisticas",         s=>{ DB.estadisticas=s.val()||{};renderStats(); renderPatrimonio(); });
+    sub("estadisticas_simbolos",s=>{ DB.estadSim=s.val()||{};   renderStats(); renderPatrimonio(); renderPorSimbolo(); });
+    sub("rendimiento_semanal",  s=>{ DB.semanas=s.val()||{};    renderSemanal(); });
+    sub("historial",            s=>{ DB.historial=s.val()||{};  renderHistorial(); poblarFiltroSym(); });
+  }
+
+  function resetUI() {
+    ["info-nombre","info-broker","info-servidor","info-login","info-lever","ts",
+     "val-balance","val-patrimonio","val-mfree","val-mlevel","val-depositado","val-retirado"]
+      .forEach(id => $(id).textContent = "—");
+    $("val-pnl").textContent = "—"; $("val-pnl").style.color = "";
+    $("val-diferencia").textContent = "—"; $("val-diferencia").style.color = "";
+    ["chart-patrimonio","chart-donut","chart-semanal","chart-simbolos"].forEach(id => emptyChart(id,"Cargando..."));
+    $("tbody-pos").innerHTML = `<tr><td colspan="7" class="empty">Cargando...</td></tr>`;
+    $("tbody-hist").innerHTML = `<tr><td colspan="6" class="empty">Cargando...</td></tr>`;
+    $("filtro-sym").innerHTML = `<option value="TODOS">Todos los símbolos</option>`;
+    filtroSym = "TODOS";
+  }
+
+  // ── Renders ──────────────────────────────────────────────
   function renderCuenta() {
     const c = DB.cuenta;
     $("info-nombre").textContent   = c.nombre||"—";
@@ -84,18 +141,14 @@
     if(c.actualizado) $("ts").textContent=fmtT(c.actualizado);
   }
 
-  // ── CAPITAL ──────────────────────────────────────────────
   function renderCapital() {
-    const c = DB.capital;
-    const mon = c.moneda||"";
+    const c=DB.capital; const mon=c.moneda||"";
     $("val-depositado").textContent = fmtAbs(c.depositado)+" "+mon;
     $("val-retirado").textContent   = fmtAbs(c.retirado)  +" "+mon;
-    const dif = $("val-diferencia");
-    dif.textContent = fmt(c.diferencia)+" "+mon;
-    dif.style.color = col(c.diferencia||0);
+    $("val-diferencia").textContent = fmt(c.diferencia)+" "+mon;
+    $("val-diferencia").style.color = col(c.diferencia||0);
   }
 
-  // ── ESTADÍSTICAS ─────────────────────────────────────────
   function getStats() {
     if(filtroSym==="TODOS") return DB.estadisticas[periodo]||null;
     return DB.estadSim[periodo]?.[symKey(filtroSym)]||null;
@@ -122,114 +175,90 @@
     $("stat-pf").textContent     = fmtAbs(e.profit_factor);
     $("stat-pf").style.color     = e.profit_factor>=1.5?"#00e676":e.profit_factor>=1?"#ffb300":"#ff5252";
     $("stat-dd").textContent     = "-"+fmtAbs(e.max_drawdown)+" "+mon;
-
     Plotly.react("chart-donut",[{
-      type:"pie", values:[e.wins||0,e.losses||0], labels:["Ganadoras","Perdedoras"],
-      hole:0.62, marker:{colors:["#00e676","#ff5252"]}, textinfo:"none",
+      type:"pie",values:[e.wins||0,e.losses||0],labels:["Ganadoras","Perdedoras"],
+      hole:0.62,marker:{colors:["#00e676","#ff5252"]},textinfo:"none",
       hovertemplate:"%{label}: %{value} (%{percent})<extra></extra>"
     }],{
-      paper_bgcolor:"transparent", plot_bgcolor:"transparent", height:CH,
-      margin:{t:10,b:30,l:10,r:10}, showlegend:true,
+      paper_bgcolor:"transparent",plot_bgcolor:"transparent",height:CH,
+      margin:{t:10,b:30,l:10,r:10},showlegend:true,
       legend:{font:{color:"#aaa",size:11},orientation:"h",y:-0.05},
       annotations:[{text:`<b>${(e.win_rate||0).toFixed(0)}%</b>`,font:{size:22,color:"#fff"},showarrow:false}]
-    }, PLOTCFG);
+    },PLOTCFG);
   }
 
-  // ── CURVA DE PATRIMONIO ──────────────────────────────────
   function renderPatrimonio() {
     const e=getStats();
-    const titulo = filtroSym==="TODOS" ? "Curva de Patrimonio" : `Curva de Patrimonio — ${filtroSym}`;
-    $("patrimonio-titulo").textContent = titulo;
-    if(!e?.equity_curve?.length){ emptyChart("chart-patrimonio"); return; }
+    $("patrimonio-titulo").textContent = filtroSym==="TODOS"?"Curva de Patrimonio":`Curva de Patrimonio — ${filtroSym}`;
+    if(!e?.equity_curve?.length){emptyChart("chart-patrimonio");return;}
     const times=e.equity_curve.map(p=>p.t);
     const vals =e.equity_curve.map(p=>p.v);
     const c    =vals[vals.length-1]>=0?"#00e676":"#ff5252";
-    // Usar newPlot con purge previo para evitar bug de div colapsado
     Plotly.purge("chart-patrimonio");
     Plotly.newPlot("chart-patrimonio",[{
-      x:times, y:vals, type:"scatter", mode:"lines", fill:"tozeroy",
+      x:times,y:vals,type:"scatter",mode:"lines",fill:"tozeroy",
       line:{color:c,width:2},
       fillcolor:c==="#00e676"?"rgba(0,230,118,0.10)":"rgba(255,82,82,0.10)",
       hovertemplate:"%{x|%d/%m %H:%M}<br>P&L: %{y:+.2f}<extra></extra>"
-    }],{...BL, hovermode:"x unified", xaxis:{...BL.xaxis,tickformat:"%d/%m"}}, PLOTCFG);
+    }],{...BL,hovermode:"x unified",xaxis:{...BL.xaxis,tickformat:"%d/%m"}},PLOTCFG);
   }
 
-  // ── RENDIMIENTO SEMANAL ──────────────────────────────────
   function renderSemanal() {
     const mon=DB.semanas.moneda||"USD";
-    let semanas = filtroSym==="TODOS"
-      ? (DB.semanas.global||[])
-      : (DB.semanas.simbolos?.[symKey(filtroSym)]||[]);
-    const titulo = filtroSym==="TODOS" ? "Rendimiento semanal (12 sem.)" : `Semanal — ${filtroSym}`;
-    $("semanal-titulo").textContent = titulo;
-    if(!semanas.length){ emptyChart("chart-semanal"); return; }
-    const labels =semanas.map(s=>s.semana);
-    const profits=semanas.map(s=>s.profit);
+    const semanas=filtroSym==="TODOS"?(DB.semanas.global||[]):(DB.semanas.simbolos?.[symKey(filtroSym)]||[]);
+    $("semanal-titulo").textContent=filtroSym==="TODOS"?"Rendimiento semanal (12 sem.)":`Semanal — ${filtroSym}`;
+    if(!semanas.length){emptyChart("chart-semanal");return;}
+    const labels=semanas.map(s=>s.semana), profits=semanas.map(s=>s.profit);
     Plotly.react("chart-semanal",[{
-      x:labels, y:profits, type:"bar",
+      x:labels,y:profits,type:"bar",
       marker:{color:profits.map(p=>p>=0?"rgba(0,230,118,0.85)":"rgba(255,82,82,0.85)"),line:{width:0}},
       hovertemplate:"Sem. %{x}<br>P&L: %{y:+.2f} "+mon+"<extra></extra>"
-    }],{...BL, bargap:0.3, xaxis:{...BL.xaxis,tickangle:-35,tickfont:{size:10}}}, PLOTCFG);
+    }],{...BL,bargap:0.3,xaxis:{...BL.xaxis,tickangle:-35,tickfont:{size:10}}},PLOTCFG);
   }
 
-  // ── PROFIT POR SÍMBOLO ───────────────────────────────────
   function renderPorSimbolo() {
-    const e30=DB.estadSim["d30"]||{};
-    const syms=Object.values(e30);
-    if(!syms.length){ emptyChart("chart-simbolos","Sin datos por símbolo"); return; }
+    const syms=Object.values(DB.estadSim["d30"]||{});
+    if(!syms.length){emptyChart("chart-simbolos","Sin datos por símbolo");return;}
     syms.sort((a,b)=>b.profit_total-a.profit_total);
-    const labels =syms.map(s=>s.nombre||"");
-    const profits=syms.map(s=>s.profit_total||0);
-    const mon    =syms[0]?.moneda||"USD";
-    // Altura dinámica según cantidad de símbolos
-    const h = Math.max(CH, syms.length * 38 + 60);
-    $("chart-simbolos").style.height = h+"px";
-    // Margen izquierdo dinámico según nombre más largo
-    const maxLen = Math.max(...labels.map(l=>l.length));
-    const ml = Math.min(Math.max(maxLen * 7, 130), 220);
+    const labels=syms.map(s=>s.nombre||""), profits=syms.map(s=>s.profit_total||0);
+    const mon=syms[0]?.moneda||"USD";
+    const h=Math.max(CH,syms.length*38+60);
+    $("chart-simbolos").style.height=h+"px";
+    const ml=Math.min(Math.max(...labels.map(l=>l.length))*7,220);
     Plotly.react("chart-simbolos",[{
-      x:profits, y:labels, type:"bar", orientation:"h",
+      x:profits,y:labels,type:"bar",orientation:"h",
       marker:{color:profits.map(p=>p>=0?"rgba(0,230,118,0.85)":"rgba(255,82,82,0.85)"),line:{width:0}},
       hovertemplate:"%{y}<br>P&L: %{x:+.2f} "+mon+"<extra></extra>"
     }],{
-      paper_bgcolor:"transparent", plot_bgcolor:"transparent",
-      font:{color:"#888"}, height:h,
-      margin:{t:10,b:40,l:ml,r:20},
+      paper_bgcolor:"transparent",plot_bgcolor:"transparent",font:{color:"#888"},
+      height:h,margin:{t:10,b:40,l:ml,r:20},
       xaxis:{gridcolor:"#1e1e1e",color:"#555",zeroline:true,zerolinecolor:"#333"},
       yaxis:{color:"#aaa",tickfont:{size:11}}
-    }, PLOTCFG);
+    },PLOTCFG);
   }
 
-  // ── POSICIONES ───────────────────────────────────────────
   function renderPosiciones() {
-    const tbody=$("tbody-pos");
-    tbody.innerHTML="";
-    const items=Object.values(DB.posiciones);
+    const tbody=$("tbody-pos"), items=Object.values(DB.posiciones);
     const lista=filtroSym==="TODOS"?items:items.filter(p=>p.symbol===filtroSym);
-    $("badge-pos").textContent=lista.length;
+    tbody.innerHTML=""; $("badge-pos").textContent=lista.length;
     if(!lista.length){tbody.innerHTML=`<tr><td colspan="7" class="empty">Sin posiciones abiertas</td></tr>`;return;}
-    lista.sort((a,b)=>a.profit-b.profit);
-    for(const p of lista){
+    lista.sort((a,b)=>a.profit-b.profit).forEach(p=>{
       const tr=document.createElement("tr");
       tr.innerHTML=`<td>${p.symbol}</td>
         <td><span class="badge ${p.tipo==="BUY"?"b-buy":"b-sell"}">${p.tipo}</span></td>
-        <td>${p.volumen}</td>
-        <td>${fmtAbs(p.precio_entrada,5)}</td>
-        <td>${fmtAbs(p.precio_actual,5)}</td>
+        <td>${p.volumen}</td><td>${fmtAbs(p.precio_entrada,5)}</td><td>${fmtAbs(p.precio_actual,5)}</td>
         <td style="color:${col(p.profit)};font-weight:600">${fmt(p.profit)}</td>
         <td style="color:#555;font-size:12px">${p.sl?fmtAbs(p.sl,5):"—"} / ${p.tp?fmtAbs(p.tp,5):"—"}</td>`;
       tbody.appendChild(tr);
-    }
+    });
   }
 
-  // ── HISTORIAL ────────────────────────────────────────────
   function renderHistorial() {
     const tbody=$("tbody-hist");
     tbody.innerHTML="";
     let items=Object.values(DB.historial);
     if(filtroSym!=="TODOS") items=items.filter(h=>h.symbol===filtroSym);
-    items.sort((a,b)=>new Date(b.tiempo)-new Date(a.tiempo));
-    for(const h of items){
+    items.sort((a,b)=>new Date(b.tiempo)-new Date(a.tiempo)).forEach(h=>{
       const tr=document.createElement("tr");
       tr.innerHTML=`<td style="color:#555;font-size:12px">${fmtT(h.tiempo)}</td>
         <td>${h.symbol}</td>
@@ -238,45 +267,41 @@
         <td style="color:${col(h.profit)};font-weight:600">${fmt(h.profit)} ${h.moneda}</td>
         <td><span class="badge ${h.profit>=0?"b-win":"b-loss"}">${h.profit>=0?"WIN":"LOSS"}</span></td>`;
       tbody.appendChild(tr);
-    }
+    });
   }
 
-  // ── FILTRO SÍMBOLO (dropdown) ─────────────────────────────
-  function poblarFiltro() {
+  function poblarFiltroSym() {
     const syms=new Set();
     Object.values(DB.posiciones).forEach(p=>syms.add(p.symbol));
     Object.values(DB.historial).forEach(h=>syms.add(h.symbol));
-    const sel=$("filtro-sym");
-    const cur=filtroSym;
+    const sel=$("filtro-sym"), cur=filtroSym;
     sel.innerHTML=`<option value="TODOS">Todos los símbolos</option>`;
     [...syms].sort().forEach(s=>{
-      const o=document.createElement("option");
-      o.value=s; o.textContent=s; sel.appendChild(o);
+      const o=document.createElement("option"); o.value=s; o.textContent=s; sel.appendChild(o);
     });
-    // Restaurar selección guardada
-    if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
-    else sel.value="TODOS";
+    if([...sel.options].some(o=>o.value===cur)) sel.value=cur; else sel.value="TODOS";
   }
 
-  // ── Aplicar estado inicial de localStorage ───────────────
-  function aplicarEstadoInicial() {
-    // Período
-    document.querySelectorAll(".bp").forEach(b=>b.classList.remove("active"));
-    const btnP=$("btn-"+periodo);
-    if(btnP) btnP.classList.add("active");
-  }
-
-  aplicarEstadoInicial();
+  // ── Aplicar estado inicial ────────────────────────────────
+  document.querySelectorAll(".bp").forEach(b=>b.classList.remove("active"));
+  const btnP=$("btn-"+periodo); if(btnP) btnP.classList.add("active");
 
   // ── Exponer al DOM ────────────────────────────────────────
+  window.cambiarCuenta = () => {
+    const login=$("sel-cuenta").value;
+    if(!login) return;
+    cuentaActiva=login;
+    localStorage.setItem("cuenta",login);
+    filtroSym="TODOS";
+    localStorage.setItem("filtroSym","TODOS");
+    suscribirCuenta(login);
+  };
   window.cambiarPeriodo = p => {
-    periodo=p;
-    localStorage.setItem("periodo",p);
+    periodo=p; localStorage.setItem("periodo",p);
     document.querySelectorAll(".bp").forEach(b=>b.classList.remove("active"));
     $("btn-"+p).classList.add("active");
     renderStats(); renderPatrimonio();
   };
-
   window.cambiarSym = () => {
     filtroSym=$("filtro-sym").value;
     localStorage.setItem("filtroSym",filtroSym);
@@ -287,57 +312,44 @@
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0a0a0a;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;display:flex;flex-direction:column;height:100vh;overflow:hidden}
-
-/* ── Sidebar ── */
 .sidebar{width:210px;min-width:210px;background:#0f0f0f;border-right:1px solid #1a1a1a;display:flex;flex-direction:column;overflow:hidden}
 .sb-logo{padding:16px 16px 12px;border-bottom:1px solid #1a1a1a}
 .sb-logo .logo{font-size:17px;font-weight:700;color:#fff;letter-spacing:-.4px}
 .sb-logo .logo span{color:#00e676}
 .sb-ts{font-size:10px;color:#444;margin-top:4px}
-.sb-section{padding:12px 14px 6px;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.6px}
+.sb-section{padding:10px 14px 5px;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.6px}
 .sb-cuenta{padding:0 14px 10px;border-bottom:1px solid #1a1a1a}
 .sb-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0}
 .sb-label{font-size:10px;color:#555}
 .sb-val{font-size:11px;color:#bbb;font-weight:600;text-align:right;max-width:115px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-select{padding:0 14px 10px;border-bottom:1px solid #1a1a1a}
+.sb-select label{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.6px;display:block;margin-bottom:5px}
+.sb-select select,.sb-sym select{width:100%;background:#161616;border:1px solid #222;color:#bbb;padding:7px 10px;border-radius:7px;font-size:12px;cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23555'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+.sb-select select:focus,.sb-sym select:focus{outline:none;border-color:#00e676}
 .sb-periodo{padding:0 14px 10px;border-bottom:1px solid #1a1a1a;display:flex;gap:6px}
 .bp{flex:1;background:#1a1a1a;border:none;color:#666;padding:6px 0;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;transition:all .15s}
 .bp.active,.bp:hover{background:#00e676;color:#000}
 .sb-sym{padding:8px 14px 10px}
-.sb-sym label{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.6px;display:block;margin-bottom:6px}
-.sb-sym select{width:100%;background:#161616;border:1px solid #222;color:#bbb;padding:7px 10px;border-radius:7px;font-size:12px;cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23555'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
-.sb-sym select:focus{outline:none;border-color:#00e676}
-
-/* ── Layout ── */
+.sb-sym label{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.6px;display:block;margin-bottom:5px}
 .app{display:flex;flex:1;overflow:hidden}
 .content{flex:1;overflow-y:auto;padding:16px 20px}
 .content::-webkit-scrollbar{width:4px}
 .content::-webkit-scrollbar-thumb{background:#1e1e1e;border-radius:4px}
-
-/* Cards */
 .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:10px}
 .cards-capital{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
 .card{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:12px 14px}
 .card.cap{border-color:#1e2a1e}
 .clabel{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
 .cval{font-size:18px;font-weight:700;color:#fff}
-
-/* Panels */
 .panel{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:14px;margin-bottom:14px}
 .ph{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:6px}
 .ptitle{font-size:10px;font-weight:600;color:#555;text-transform:uppercase;letter-spacing:.6px}
 .g2{display:grid;grid-template-columns:1fr 300px;gap:14px;margin-bottom:14px}
-
-/* Stats */
 .sgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
 .si{background:#161616;border-radius:8px;padding:10px 12px}
 .slabel{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.4px}
 .sval{font-size:15px;font-weight:700;color:#e0e0e0;margin-top:3px}
-
-/* Charts — height fija en CSS como fallback */
-#chart-patrimonio,#chart-semanal,#chart-donut{height:210px}
-#chart-simbolos{height:210px}
-
-/* Tablas */
+#chart-patrimonio,#chart-semanal,#chart-donut,#chart-simbolos{height:210px}
 .twrap{max-height:220px;overflow-y:auto}
 .twrap::-webkit-scrollbar{width:3px}
 .twrap::-webkit-scrollbar-thumb{background:#1e1e1e;border-radius:3px}
@@ -347,21 +359,13 @@ td{padding:6px 10px;border-bottom:1px solid #141414;color:#ccc}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:#141414}
 .empty{text-align:center;color:#444;padding:18px!important}
-
 .badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600}
 .b-buy{background:rgba(66,165,245,.15);color:#42a5f5}
 .b-sell{background:rgba(255,82,82,.15);color:#ff5252}
 .b-win{background:rgba(0,230,118,.12);color:#00e676}
 .b-loss{background:rgba(255,82,82,.10);color:#ff5252}
 .bnum{background:#00e676;color:#000;font-size:10px;padding:1px 6px;border-radius:10px;margin-left:6px;font-weight:700}
-
-@media(max-width:960px){
-  .cards{grid-template-columns:repeat(2,1fr)}
-  .cards-capital{grid-template-columns:repeat(3,1fr)}
-  .g2{grid-template-columns:1fr}
-  .sgrid{grid-template-columns:repeat(2,1fr)}
-  .sidebar{width:180px;min-width:180px}
-}
+@media(max-width:960px){.cards{grid-template-columns:repeat(2,1fr)}.g2{grid-template-columns:1fr}.sgrid{grid-template-columns:repeat(2,1fr)}.sidebar{width:180px;min-width:180px}}
 </style>
 </head>
 <body>
@@ -375,6 +379,12 @@ tr:hover td{background:#141414}
     </div>
 
     <div class="sb-section">Cuenta</div>
+    <div class="sb-select">
+      <label>Seleccionar cuenta</label>
+      <select id="sel-cuenta" onchange="cambiarCuenta()">
+        <option value="">Cargando...</option>
+      </select>
+    </div>
     <div class="sb-cuenta">
       <div class="sb-row"><span class="sb-label">Nombre</span><span class="sb-val" id="info-nombre">—</span></div>
       <div class="sb-row"><span class="sb-label">Broker</span><span class="sb-val" id="info-broker">—</span></div>
@@ -400,8 +410,6 @@ tr:hover td{background:#141414}
 
   <!-- CONTENIDO -->
   <div class="content">
-
-    <!-- Fila 1: métricas de cuenta -->
     <div class="cards">
       <div class="card"><div class="clabel">Balance</div><div class="cval" id="val-balance">—</div></div>
       <div class="card"><div class="clabel">Patrimonio</div><div class="cval" id="val-patrimonio">—</div></div>
@@ -409,15 +417,11 @@ tr:hover td{background:#141414}
       <div class="card"><div class="clabel">Nivel margen</div><div class="cval" id="val-mlevel">—</div></div>
       <div class="card"><div class="clabel">P&L abierto</div><div class="cval" id="val-pnl">—</div></div>
     </div>
-
-    <!-- Fila 2: capital -->
     <div class="cards-capital">
       <div class="card cap"><div class="clabel">Capital ingresado</div><div class="cval" id="val-depositado">—</div></div>
       <div class="card cap"><div class="clabel">Capital egresado</div><div class="cval" id="val-retirado">—</div></div>
       <div class="card cap"><div class="clabel">Diferencia (P&L neto)</div><div class="cval" id="val-diferencia">—</div></div>
     </div>
-
-    <!-- Curva de patrimonio + Donut -->
     <div class="g2">
       <div class="panel">
         <div class="ph"><span class="ptitle" id="patrimonio-titulo">Curva de Patrimonio</span></div>
@@ -428,8 +432,6 @@ tr:hover td{background:#141414}
         <div id="chart-donut"></div>
       </div>
     </div>
-
-    <!-- Semanal + Por símbolo -->
     <div class="g2">
       <div class="panel">
         <div class="ph"><span class="ptitle" id="semanal-titulo">Rendimiento semanal (12 sem.)</span></div>
@@ -440,8 +442,6 @@ tr:hover td{background:#141414}
         <div id="chart-simbolos"></div>
       </div>
     </div>
-
-    <!-- Estadísticas -->
     <div class="panel">
       <div class="ph"><span class="ptitle" id="stats-titulo">Estadísticas del período</span></div>
       <div class="sgrid">
@@ -456,8 +456,6 @@ tr:hover td{background:#141414}
         <div class="si" style="grid-column:span 4"><div class="slabel">Max Drawdown</div><div class="sval" style="color:#ff5252" id="stat-dd">—</div></div>
       </div>
     </div>
-
-    <!-- Posiciones -->
     <div class="panel">
       <div class="ph">
         <div style="display:flex;align-items:center">
@@ -472,8 +470,6 @@ tr:hover td{background:#141414}
         </table>
       </div>
     </div>
-
-    <!-- Historial -->
     <div class="panel">
       <div class="ph"><span class="ptitle">Historial (últimas 50)</span></div>
       <div class="twrap">
@@ -483,8 +479,7 @@ tr:hover td{background:#141414}
         </table>
       </div>
     </div>
-
-  </div><!-- /content -->
-</div><!-- /app -->
+  </div>
+</div>
 </body>
 </html>
