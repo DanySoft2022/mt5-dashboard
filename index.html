@@ -28,27 +28,32 @@
   const fmtAbs = (n,d=2) => n==null?"—":parseFloat(n).toFixed(d);
   const col    = n => parseFloat(n)>=0?"#00e676":"#ff5252";
   const fmtT   = iso => new Date(iso).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit"});
-  const symKey = s => s.replace(/[/() ]/g,"_");
+  // Debe coincidir exactamente con el uploader Python:
+  // sym.replace("/","_").replace(" ","_").replace("(","").replace(")","")
+  const symKey = s => s.replace(/\(/g,"").replace(/\)/g,"").replace(/[/ ]/g,"_");
   const $      = id => document.getElementById(id);
 
-  const BASE_LAYOUT = {
+  const BL = {
     paper_bgcolor:"transparent", plot_bgcolor:"transparent",
     font:{color:"#888"}, margin:{t:10,b:40,l:55,r:15},
     xaxis:{gridcolor:"#1e1e1e",color:"#555"},
     yaxis:{gridcolor:"#1e1e1e",color:"#555",zeroline:true,zerolinecolor:"#333"}
   };
+  const PLOTCFG = {responsive:true,displayModeBar:false};
 
-  onValue(ref(db,"cuenta"),          s=>{ DB.cuenta=s.val()||{}; renderCuenta(); });
-  onValue(ref(db,"posiciones"),      s=>{ DB.posiciones=s.val()||{}; renderPosiciones(); poblarFiltro(); });
-  onValue(ref(db,"estadisticas"),    s=>{ DB.estadisticas=s.val()||{}; renderStats(); renderEquity(); });
-  onValue(ref(db,"estadisticas_simbolos"), s=>{ DB.estadSim=s.val()||{}; renderStats(); renderEquity(); renderPorSimbolo(); });
-  onValue(ref(db,"rendimiento_semanal"),   s=>{ DB.semanas=s.val()||{}; renderSemanal(); });
-  onValue(ref(db,"historial"),       s=>{ DB.historial=s.val()||{}; renderHistorial(); poblarFiltro(); });
+  onValue(ref(db,"cuenta"),               s=>{ DB.cuenta=s.val()||{}; renderCuenta(); });
+  onValue(ref(db,"posiciones"),           s=>{ DB.posiciones=s.val()||{}; renderPosiciones(); poblarFiltro(); });
+  onValue(ref(db,"estadisticas"),         s=>{ DB.estadisticas=s.val()||{}; renderStats(); renderEquity(); });
+  onValue(ref(db,"estadisticas_simbolos"),s=>{ DB.estadSim=s.val()||{}; renderStats(); renderEquity(); renderPorSimbolo(); });
+  onValue(ref(db,"rendimiento_semanal"),  s=>{ DB.semanas=s.val()||{}; renderSemanal(); });
+  onValue(ref(db,"historial"),            s=>{ DB.historial=s.val()||{}; renderHistorial(); poblarFiltro(); });
 
+  // ── CUENTA ──────────────────────────────────────────────
   function renderCuenta() {
     const c = DB.cuenta;
     $("info-nombre").textContent = c.nombre||"—";
     $("info-broker").textContent = c.broker||"—";
+    $("info-servidor").textContent = c.servidor||"—";
     $("info-login").textContent  = c.login||"—";
     $("info-lever").textContent  = c.leverage?"1:"+c.leverage:"—";
     $("val-balance").textContent = fmtAbs(c.balance)+" "+(c.moneda||"");
@@ -58,9 +63,10 @@
     const pnl=(c.equity||0)-(c.balance||0);
     $("val-pnl").textContent=fmt(pnl)+" "+(c.moneda||"");
     $("val-pnl").style.color=col(pnl);
-    if(c.actualizado) $("ts").textContent="Actualizado: "+fmtT(c.actualizado);
+    if(c.actualizado) $("ts").textContent=fmtT(c.actualizado);
   }
 
+  // ── STATS ────────────────────────────────────────────────
   function getStats() {
     if(filtroSym==="TODOS") return DB.estadisticas[periodo]||null;
     const k=symKey(filtroSym);
@@ -69,9 +75,8 @@
 
   function renderStats() {
     const e=getStats();
-    $("stats-titulo").textContent="Estadísticas"+(filtroSym!=="TODOS"?" — "+filtroSym:"");
     const ids=["stat-total","stat-wins","stat-losses","stat-winrate","stat-profit","stat-gmed","stat-pmed","stat-pf","stat-dd"];
-    if(!e){ids.forEach(id=>$(id).textContent="—");return;}
+    if(!e){ids.forEach(id=>$(id).textContent="—");Plotly.react("chart-donut",[],{...BL},PLOTCFG);return;}
     const mon=e.moneda||"USD";
     $("stat-total").textContent  = e.total||0;
     $("stat-wins").textContent   = e.wins||0;
@@ -88,20 +93,20 @@
 
     Plotly.react("chart-donut",[{
       type:"pie",values:[e.wins||0,e.losses||0],labels:["Ganadoras","Perdedoras"],
-      hole:0.6,marker:{colors:["#00e676","#ff5252"]},textinfo:"none",
+      hole:0.62,marker:{colors:["#00e676","#ff5252"]},textinfo:"none",
       hovertemplate:"%{label}: %{value} (%{percent})<extra></extra>"
     }],{
       paper_bgcolor:"transparent",plot_bgcolor:"transparent",
       margin:{t:10,b:10,l:10,r:10},showlegend:true,
       legend:{font:{color:"#aaa",size:11},orientation:"h",y:-0.1},
       annotations:[{text:`<b>${(e.win_rate||0).toFixed(0)}%</b>`,font:{size:22,color:"#fff"},showarrow:false}]
-    },{responsive:true,displayModeBar:false});
+    },PLOTCFG);
   }
 
+  // ── EQUITY CURVE ─────────────────────────────────────────
   function renderEquity() {
     const e=getStats();
-    $("equity-titulo").textContent="Equity Curve"+(filtroSym!=="TODOS"?" — "+filtroSym:"");
-    if(!e?.equity_curve?.length){Plotly.react("chart-equity",[],BASE_LAYOUT,{responsive:true,displayModeBar:false});return;}
+    if(!e?.equity_curve?.length){Plotly.react("chart-equity",[],BL,PLOTCFG);return;}
     const times=e.equity_curve.map(p=>p.t);
     const vals =e.equity_curve.map(p=>p.v);
     const c    =vals[vals.length-1]>=0?"#00e676":"#ff5252";
@@ -110,10 +115,10 @@
       line:{color:c,width:2},
       fillcolor:c==="#00e676"?"rgba(0,230,118,0.10)":"rgba(255,82,82,0.10)",
       hovertemplate:"%{x|%d/%m %H:%M}<br>P&L: %{y:.2f}<extra></extra>"
-    }],{...BASE_LAYOUT,hovermode:"x unified",xaxis:{...BASE_LAYOUT.xaxis,tickformat:"%d/%m"}},
-    {responsive:true,displayModeBar:false});
+    }],{...BL,hovermode:"x unified",xaxis:{...BL.xaxis,tickformat:"%d/%m"}},PLOTCFG);
   }
 
+  // ── SEMANAL ──────────────────────────────────────────────
   function renderSemanal() {
     let semanas;
     const mon=DB.semanas.moneda||"USD";
@@ -123,34 +128,36 @@
       const k=symKey(filtroSym);
       semanas=DB.semanas.simbolos?.[k]||[];
     }
-    $("semanal-titulo").textContent="Rendimiento semanal"+(filtroSym!=="TODOS"?" — "+filtroSym:" (12 semanas)");
-    if(!semanas.length){Plotly.react("chart-semanal",[],BASE_LAYOUT,{responsive:true,displayModeBar:false});return;}
+    if(!semanas.length){Plotly.react("chart-semanal",[],BL,PLOTCFG);return;}
     const labels =semanas.map(s=>s.semana);
     const profits=semanas.map(s=>s.profit);
     Plotly.react("chart-semanal",[{
       x:labels,y:profits,type:"bar",
-      marker:{color:profits.map(p=>p>=0?"rgba(0,230,118,0.8)":"rgba(255,82,82,0.8)")},
-      hovertemplate:"Semana %{x}<br>P&L: %{y:.2f} "+mon+"<extra></extra>"
-    }],{...BASE_LAYOUT,xaxis:{...BASE_LAYOUT.xaxis,tickangle:-30,tickfont:{size:10}}},
-    {responsive:true,displayModeBar:false});
+      marker:{color:profits.map(p=>p>=0?"rgba(0,230,118,0.85)":"rgba(255,82,82,0.85)"),
+              line:{width:0}},
+      hovertemplate:"Semana del %{x}<br>P&L: %{y:+.2f} "+mon+"<extra></extra>"
+    }],{...BL,bargap:0.3,xaxis:{...BL.xaxis,tickangle:-35,tickfont:{size:10}}},PLOTCFG);
   }
 
+  // ── POR SÍMBOLO ──────────────────────────────────────────
   function renderPorSimbolo() {
     const e30=DB.estadSim["d30"]||{};
     const syms=Object.values(e30);
-    if(!syms.length) return;
+    if(!syms.length){Plotly.react("chart-simbolos",[],BL,PLOTCFG);return;}
     syms.sort((a,b)=>b.profit_total-a.profit_total);
     const labels =syms.map(s=>s.nombre||"");
     const profits=syms.map(s=>s.profit_total||0);
     const mon    =syms[0]?.moneda||"USD";
     Plotly.react("chart-simbolos",[{
       x:profits,y:labels,type:"bar",orientation:"h",
-      marker:{color:profits.map(p=>p>=0?"rgba(0,230,118,0.8)":"rgba(255,82,82,0.8)")},
-      hovertemplate:"%{y}<br>P&L: %{x:.2f} "+mon+"<extra></extra>"
-    }],{...BASE_LAYOUT,margin:{t:10,b:40,l:180,r:15},yaxis:{...BASE_LAYOUT.yaxis,automargin:true}},
-    {responsive:true,displayModeBar:false});
+      marker:{color:profits.map(p=>p>=0?"rgba(0,230,118,0.85)":"rgba(255,82,82,0.85)"),
+              line:{width:0}},
+      hovertemplate:"%{y}<br>P&L: %{x:+.2f} "+mon+"<extra></extra>"
+    }],{...BL,margin:{t:10,b:40,l:175,r:20},
+      yaxis:{...BL.yaxis,automargin:false}},PLOTCFG);
   }
 
+  // ── POSICIONES ───────────────────────────────────────────
   function renderPosiciones() {
     const tbody=$("tbody-pos");
     tbody.innerHTML="";
@@ -161,11 +168,17 @@
     lista.sort((a,b)=>a.profit-b.profit);
     for(const p of lista){
       const tr=document.createElement("tr");
-      tr.innerHTML=`<td>${p.symbol}</td><td><span class="badge ${p.tipo==="BUY"?"b-buy":"b-sell"}">${p.tipo}</span></td><td>${p.volumen}</td><td>${fmtAbs(p.precio_entrada,5)}</td><td>${fmtAbs(p.precio_actual,5)}</td><td style="color:${col(p.profit)};font-weight:600">${fmt(p.profit)}</td><td style="color:#555;font-size:12px">${p.sl?fmtAbs(p.sl,5):"—"} / ${p.tp?fmtAbs(p.tp,5):"—"}</td>`;
+      tr.innerHTML=`<td>${p.symbol}</td>
+        <td><span class="badge ${p.tipo==="BUY"?"b-buy":"b-sell"}">${p.tipo}</span></td>
+        <td>${p.volumen}</td><td>${fmtAbs(p.precio_entrada,5)}</td>
+        <td>${fmtAbs(p.precio_actual,5)}</td>
+        <td style="color:${col(p.profit)};font-weight:600">${fmt(p.profit)}</td>
+        <td style="color:#555;font-size:12px">${p.sl?fmtAbs(p.sl,5):"—"} / ${p.tp?fmtAbs(p.tp,5):"—"}</td>`;
       tbody.appendChild(tr);
     }
   }
 
+  // ── HISTORIAL ────────────────────────────────────────────
   function renderHistorial() {
     const tbody=$("tbody-hist");
     tbody.innerHTML="";
@@ -174,20 +187,47 @@
     items.sort((a,b)=>new Date(b.tiempo)-new Date(a.tiempo));
     for(const h of items){
       const tr=document.createElement("tr");
-      tr.innerHTML=`<td style="color:#555;font-size:12px">${fmtT(h.tiempo)}</td><td>${h.symbol}</td><td><span class="badge ${h.tipo==="BUY"?"b-buy":"b-sell"}">${h.tipo}</span></td><td>${h.volumen}</td><td style="color:${col(h.profit)};font-weight:600">${fmt(h.profit)} ${h.moneda}</td><td><span class="badge ${h.profit>=0?"b-win":"b-loss"}">${h.profit>=0?"WIN":"LOSS"}</span></td>`;
+      tr.innerHTML=`<td style="color:#555;font-size:12px">${fmtT(h.tiempo)}</td>
+        <td>${h.symbol}</td>
+        <td><span class="badge ${h.tipo==="BUY"?"b-buy":"b-sell"}">${h.tipo}</span></td>
+        <td>${h.volumen}</td>
+        <td style="color:${col(h.profit)};font-weight:600">${fmt(h.profit)} ${h.moneda}</td>
+        <td><span class="badge ${h.profit>=0?"b-win":"b-loss"}">${h.profit>=0?"WIN":"LOSS"}</span></td>`;
       tbody.appendChild(tr);
     }
   }
 
+  // ── FILTRO ────────────────────────────────────────────────
   function poblarFiltro() {
     const syms=new Set();
     Object.values(DB.posiciones).forEach(p=>syms.add(p.symbol));
     Object.values(DB.historial).forEach(h=>syms.add(h.symbol));
-    const sel=$("filtro-sym");
-    const cur=sel.value;
-    sel.innerHTML=`<option value="TODOS">Todos los símbolos</option>`;
-    [...syms].sort().forEach(s=>{const o=document.createElement("option");o.value=s;o.textContent=s;sel.appendChild(o);});
-    if(cur) sel.value=cur;
+    const cont=$("sym-list");
+    const cur=filtroSym;
+    cont.innerHTML="";
+
+    // Botón "Todos"
+    const all=document.createElement("button");
+    all.className="sym-btn"+(cur==="TODOS"?" active":"");
+    all.textContent="Todos";
+    all.onclick=()=>setSym("TODOS");
+    cont.appendChild(all);
+
+    [...syms].sort().forEach(s=>{
+      const b=document.createElement("button");
+      b.className="sym-btn"+(cur===s?" active":"");
+      b.textContent=s;
+      b.title=s;
+      b.onclick=()=>setSym(s);
+      cont.appendChild(b);
+    });
+  }
+
+  function setSym(s) {
+    filtroSym=s;
+    poblarFiltro();
+    renderStats(); renderEquity(); renderSemanal();
+    renderPosiciones(); renderHistorial();
   }
 
   window.cambiarPeriodo = p => {
@@ -196,158 +236,222 @@
     $("btn-"+p).classList.add("active");
     renderStats(); renderEquity();
   };
-  window.cambiarSym = () => {
-    filtroSym=$("filtro-sym").value;
-    renderStats(); renderEquity(); renderSemanal();
-    renderPosiciones(); renderHistorial();
-  };
 </script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0a0a0a;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
-.hdr{background:#111;border-bottom:1px solid #1a1a1a;padding:12px 22px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
-.logo{font-size:18px;font-weight:700;color:#fff;letter-spacing:-.5px}.logo span{color:#00e676}
-.hinfo{font-size:12px;color:#666}.hinfo strong{color:#aaa}
-#ts{font-size:11px;color:#444}
-.main{padding:18px 22px;max-width:1500px;margin:0 auto}
+body{background:#0a0a0a;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+/* ── Sidebar ── */
+.sidebar{
+  width:200px;min-width:200px;background:#0f0f0f;
+  border-right:1px solid #1a1a1a;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.sb-logo{padding:16px 16px 12px;border-bottom:1px solid #1a1a1a}
+.sb-logo .logo{font-size:17px;font-weight:700;color:#fff;letter-spacing:-.4px}
+.sb-logo .logo span{color:#00e676}
+.sb-ts{font-size:10px;color:#444;margin-top:4px}
+
+.sb-section{padding:12px 12px 6px;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.6px}
+
+/* Cuenta info sidebar */
+.sb-cuenta{padding:0 12px 12px;border-bottom:1px solid #1a1a1a}
+.sb-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0}
+.sb-label{font-size:10px;color:#555}
+.sb-val{font-size:11px;color:#bbb;font-weight:600;text-align:right;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Periodo buttons */
+.sb-periodo{padding:0 12px 12px;border-bottom:1px solid #1a1a1a;display:flex;gap:6px}
+.bp{flex:1;background:#1a1a1a;border:none;color:#666;padding:6px 0;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;transition:all .15s}
+.bp.active,.bp:hover{background:#00e676;color:#000}
+
+/* Símbolo list */
+.sym-scroll{flex:1;overflow-y:auto;padding:0 8px 12px}
+.sym-scroll::-webkit-scrollbar{width:3px}
+.sym-scroll::-webkit-scrollbar-thumb{background:#1e1e1e;border-radius:3px}
+.sym-btn{
+  display:block;width:100%;text-align:left;
+  background:none;border:none;color:#777;
+  padding:7px 8px;border-radius:6px;cursor:pointer;
+  font-size:12px;transition:all .15s;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  margin-bottom:2px;
+}
+.sym-btn:hover{background:#1a1a1a;color:#ccc}
+.sym-btn.active{background:#00e676;color:#000;font-weight:600}
+
+/* ── Layout principal ── */
+.app{display:flex;flex:1;overflow:hidden}
+.content{flex:1;overflow-y:auto;padding:16px 20px}
+.content::-webkit-scrollbar{width:4px}
+.content::-webkit-scrollbar-thumb{background:#1e1e1e;border-radius:4px}
+
+/* Cards top */
 .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
-.card{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:14px 16px}
-.clabel{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
-.cval{font-size:20px;font-weight:700;color:#fff}
-.panel{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:16px;margin-bottom:14px}
-.ph{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px}
-.ptitle{font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:.6px}
-.g2{display:grid;grid-template-columns:1fr 320px;gap:14px;margin-bottom:14px}
-.sgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}
+.card{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:12px 14px}
+.clabel{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.cval{font-size:18px;font-weight:700;color:#fff}
+
+/* Panels */
+.panel{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:14px;margin-bottom:14px}
+.ph{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:6px}
+.ptitle{font-size:10px;font-weight:600;color:#555;text-transform:uppercase;letter-spacing:.6px}
+
+/* Grid 2 cols */
+.g2{display:grid;grid-template-columns:1fr 300px;gap:14px;margin-bottom:14px}
+
+/* Stats */
+.sgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
 .si{background:#161616;border-radius:8px;padding:10px 12px}
 .slabel{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.4px}
 .sval{font-size:15px;font-weight:700;color:#e0e0e0;margin-top:3px}
-#chart-equity,#chart-semanal,#chart-simbolos,#chart-donut{height:220px}
-.filtros{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-select{background:#161616;border:1px solid #222;color:#bbb;padding:5px 10px;border-radius:6px;font-size:12px;cursor:pointer}
-select:focus{outline:none;border-color:#00e676}
-.bps{display:flex;gap:5px}
-.bp{background:#1a1a1a;border:none;color:#666;padding:4px 11px;border-radius:6px;cursor:pointer;font-size:12px;transition:all .15s}
-.bp.active,.bp:hover{background:#00e676;color:#000;font-weight:600}
-.twrap{max-height:240px;overflow-y:auto}
+
+/* Charts */
+#chart-equity,#chart-semanal,#chart-simbolos{height:200px}
+#chart-donut{height:200px}
+
+/* Tablas */
+.twrap{max-height:220px;overflow-y:auto}
 .twrap::-webkit-scrollbar{width:3px}
-.twrap::-webkit-scrollbar-thumb{background:#222;border-radius:3px}
+.twrap::-webkit-scrollbar-thumb{background:#1e1e1e;border-radius:3px}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.5px;padding:7px 10px;border-bottom:1px solid #1a1a1a}
-td{padding:7px 10px;border-bottom:1px solid #141414;color:#ccc}
+th{text-align:left;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.5px;padding:6px 10px;border-bottom:1px solid #1a1a1a;white-space:nowrap}
+td{padding:6px 10px;border-bottom:1px solid #141414;color:#ccc}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:#141414}
-.empty{text-align:center;color:#444;padding:20px!important}
+.empty{text-align:center;color:#444;padding:18px!important}
+
+/* Badges */
 .badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600}
 .b-buy{background:rgba(66,165,245,.15);color:#42a5f5}
 .b-sell{background:rgba(255,82,82,.15);color:#ff5252}
 .b-win{background:rgba(0,230,118,.12);color:#00e676}
 .b-loss{background:rgba(255,82,82,.10);color:#ff5252}
 .bnum{background:#00e676;color:#000;font-size:10px;padding:1px 6px;border-radius:10px;margin-left:6px;font-weight:700}
-@media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}.g2{grid-template-columns:1fr}.sgrid{grid-template-columns:repeat(2,1fr)}}
+
+@media(max-width:960px){
+  .cards{grid-template-columns:repeat(2,1fr)}
+  .g2{grid-template-columns:1fr}
+  .sgrid{grid-template-columns:repeat(2,1fr)}
+  .sidebar{width:160px;min-width:160px}
+}
 </style>
 </head>
 <body>
 
-<div class="hdr">
-  <div style="display:flex;align-items:center;gap:14px">
-    <div class="logo">MT5 <span>Dashboard</span></div>
-    <div class="hinfo">
-      <strong id="info-nombre">—</strong> &nbsp;|&nbsp;
-      <span id="info-broker">—</span> &nbsp;|&nbsp;
-      Login: <strong id="info-login">—</strong> &nbsp;|&nbsp;
-      <span id="info-lever">—</span>
+<div class="app">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="sb-logo">
+      <div class="logo">MT5 <span>Live</span></div>
+      <div class="sb-ts" id="ts">Sin datos</div>
+    </div>
+
+    <div class="sb-section">Cuenta</div>
+    <div class="sb-cuenta">
+      <div class="sb-row"><span class="sb-label">Nombre</span><span class="sb-val" id="info-nombre">—</span></div>
+      <div class="sb-row"><span class="sb-label">Broker</span><span class="sb-val" id="info-broker">—</span></div>
+      <div class="sb-row"><span class="sb-label">Servidor</span><span class="sb-val" id="info-servidor">—</span></div>
+      <div class="sb-row"><span class="sb-label">Login</span><span class="sb-val" id="info-login">—</span></div>
+      <div class="sb-row"><span class="sb-label">Apalancam.</span><span class="sb-val" id="info-lever">—</span></div>
+    </div>
+
+    <div class="sb-section">Período</div>
+    <div class="sb-periodo">
+      <button class="bp" id="btn-d7"  onclick="cambiarPeriodo('d7')">7D</button>
+      <button class="bp active" id="btn-d30" onclick="cambiarPeriodo('d30')">30D</button>
+      <button class="bp" id="btn-d90" onclick="cambiarPeriodo('d90')">90D</button>
+    </div>
+
+    <div class="sb-section">Símbolo</div>
+    <div class="sym-scroll">
+      <div id="sym-list"></div>
     </div>
   </div>
-  <div style="display:flex;align-items:center;gap:14px">
-    <div class="filtros">
-      <select id="filtro-sym" onchange="cambiarSym()">
-        <option value="TODOS">Todos los símbolos</option>
-      </select>
+
+  <!-- CONTENIDO -->
+  <div class="content">
+
+    <!-- Cards top -->
+    <div class="cards">
+      <div class="card"><div class="clabel">Balance</div><div class="cval" id="val-balance">—</div></div>
+      <div class="card"><div class="clabel">Equity</div><div class="cval" id="val-equity">—</div></div>
+      <div class="card"><div class="clabel">Margen libre</div><div class="cval" id="val-mfree">—</div></div>
+      <div class="card"><div class="clabel">Nivel margen</div><div class="cval" id="val-mlevel">—</div></div>
+      <div class="card"><div class="clabel">P&L abierto</div><div class="cval" id="val-pnl">—</div></div>
     </div>
-    <div id="ts">Sin datos</div>
-  </div>
-</div>
 
-<div class="main">
+    <!-- Equity + Donut -->
+    <div class="g2">
+      <div class="panel">
+        <div class="ph"><span class="ptitle" id="equity-titulo">Equity Curve</span></div>
+        <div id="chart-equity"></div>
+      </div>
+      <div class="panel">
+        <div class="ph"><span class="ptitle">Win / Loss</span></div>
+        <div id="chart-donut"></div>
+      </div>
+    </div>
 
-  <div class="cards">
-    <div class="card"><div class="clabel">Balance</div><div class="cval" id="val-balance">—</div></div>
-    <div class="card"><div class="clabel">Equity</div><div class="cval" id="val-equity">—</div></div>
-    <div class="card"><div class="clabel">Margen libre</div><div class="cval" id="val-mfree">—</div></div>
-    <div class="card"><div class="clabel">Nivel margen</div><div class="cval" id="val-mlevel">—</div></div>
-    <div class="card"><div class="clabel">P&L abierto</div><div class="cval" id="val-pnl">—</div></div>
-  </div>
+    <!-- Semanal + Por símbolo -->
+    <div class="g2">
+      <div class="panel">
+        <div class="ph"><span class="ptitle" id="semanal-titulo">Rendimiento semanal</span></div>
+        <div id="chart-semanal"></div>
+      </div>
+      <div class="panel">
+        <div class="ph"><span class="ptitle">Profit por símbolo (30D)</span></div>
+        <div id="chart-simbolos"></div>
+      </div>
+    </div>
 
-  <div class="g2">
+    <!-- Stats -->
+    <div class="panel">
+      <div class="ph"><span class="ptitle" id="stats-titulo">Estadísticas del período</span></div>
+      <div class="sgrid">
+        <div class="si"><div class="slabel">Operaciones</div><div class="sval" id="stat-total">—</div></div>
+        <div class="si"><div class="slabel">Ganadoras</div><div class="sval" style="color:#00e676" id="stat-wins">—</div></div>
+        <div class="si"><div class="slabel">Perdedoras</div><div class="sval" style="color:#ff5252" id="stat-losses">—</div></div>
+        <div class="si"><div class="slabel">Win Rate</div><div class="sval" id="stat-winrate">—</div></div>
+        <div class="si"><div class="slabel">Profit Total</div><div class="sval" id="stat-profit">—</div></div>
+        <div class="si"><div class="slabel">Ganancia media</div><div class="sval" id="stat-gmed">—</div></div>
+        <div class="si"><div class="slabel">Pérdida media</div><div class="sval" id="stat-pmed">—</div></div>
+        <div class="si"><div class="slabel">Profit Factor</div><div class="sval" id="stat-pf">—</div></div>
+        <div class="si" style="grid-column:span 4"><div class="slabel">Max Drawdown</div><div class="sval" style="color:#ff5252" id="stat-dd">—</div></div>
+      </div>
+    </div>
+
+    <!-- Posiciones -->
     <div class="panel">
       <div class="ph">
-        <span class="ptitle" id="equity-titulo">Equity Curve</span>
-        <div class="bps">
-          <button class="bp" id="btn-d7"  onclick="cambiarPeriodo('d7')">7D</button>
-          <button class="bp active" id="btn-d30" onclick="cambiarPeriodo('d30')">30D</button>
-          <button class="bp" id="btn-d90" onclick="cambiarPeriodo('d90')">90D</button>
+        <div style="display:flex;align-items:center">
+          <span class="ptitle">Posiciones abiertas</span>
+          <span class="bnum" id="badge-pos">0</span>
         </div>
       </div>
-      <div id="chart-equity"></div>
-    </div>
-    <div class="panel">
-      <div class="ph"><span class="ptitle">Win / Loss</span></div>
-      <div id="chart-donut"></div>
-    </div>
-  </div>
-
-  <div class="g2">
-    <div class="panel">
-      <div class="ph"><span class="ptitle" id="semanal-titulo">Rendimiento semanal (12 semanas)</span></div>
-      <div id="chart-semanal"></div>
-    </div>
-    <div class="panel">
-      <div class="ph"><span class="ptitle">Profit por símbolo (30D)</span></div>
-      <div id="chart-simbolos"></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="ph"><span class="ptitle" id="stats-titulo">Estadísticas del período</span></div>
-    <div class="sgrid">
-      <div class="si"><div class="slabel">Operaciones</div><div class="sval" id="stat-total">—</div></div>
-      <div class="si"><div class="slabel">Ganadoras</div><div class="sval" style="color:#00e676" id="stat-wins">—</div></div>
-      <div class="si"><div class="slabel">Perdedoras</div><div class="sval" style="color:#ff5252" id="stat-losses">—</div></div>
-      <div class="si"><div class="slabel">Win Rate</div><div class="sval" id="stat-winrate">—</div></div>
-      <div class="si"><div class="slabel">Profit Total</div><div class="sval" id="stat-profit">—</div></div>
-      <div class="si"><div class="slabel">Ganancia media</div><div class="sval" id="stat-gmed">—</div></div>
-      <div class="si"><div class="slabel">Pérdida media</div><div class="sval" id="stat-pmed">—</div></div>
-      <div class="si"><div class="slabel">Profit Factor</div><div class="sval" id="stat-pf">—</div></div>
-      <div class="si" style="grid-column:span 4"><div class="slabel">Max Drawdown</div><div class="sval" style="color:#ff5252" id="stat-dd">—</div></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="ph">
-      <div style="display:flex;align-items:center">
-        <span class="ptitle">Posiciones abiertas</span>
-        <span class="bnum" id="badge-pos">0</span>
+      <div class="twrap">
+        <table>
+          <thead><tr><th>Símbolo</th><th>Tipo</th><th>Lote</th><th>Entrada</th><th>Actual</th><th>P&L</th><th>SL / TP</th></tr></thead>
+          <tbody id="tbody-pos"><tr><td colspan="7" class="empty">Cargando...</td></tr></tbody>
+        </table>
       </div>
     </div>
-    <div class="twrap">
-      <table>
-        <thead><tr><th>Símbolo</th><th>Tipo</th><th>Lote</th><th>Entrada</th><th>Actual</th><th>P&L</th><th>SL / TP</th></tr></thead>
-        <tbody id="tbody-pos"><tr><td colspan="7" class="empty">Cargando...</td></tr></tbody>
-      </table>
-    </div>
-  </div>
 
-  <div class="panel">
-    <div class="ph"><span class="ptitle">Historial (últimas 50)</span></div>
-    <div class="twrap">
-      <table>
-        <thead><tr><th>Fecha</th><th>Símbolo</th><th>Tipo</th><th>Lote</th><th>P&L</th><th>Resultado</th></tr></thead>
-        <tbody id="tbody-hist"><tr><td colspan="6" class="empty">Cargando...</td></tr></tbody>
-      </table>
+    <!-- Historial -->
+    <div class="panel">
+      <div class="ph"><span class="ptitle">Historial (últimas 50)</span></div>
+      <div class="twrap">
+        <table>
+          <thead><tr><th>Fecha</th><th>Símbolo</th><th>Tipo</th><th>Lote</th><th>P&L</th><th>Resultado</th></tr></thead>
+          <tbody id="tbody-hist"><tr><td colspan="6" class="empty">Cargando...</td></tr></tbody>
+        </table>
+      </div>
     </div>
-  </div>
 
-</div>
+  </div><!-- /content -->
+</div><!-- /app -->
+
 </body>
 </html>
