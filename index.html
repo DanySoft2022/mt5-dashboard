@@ -260,7 +260,14 @@
     tbody.innerHTML="";
     let items=Object.values(DB.historial);
     if(filtroSym!=="TODOS") items=items.filter(h=>h.symbol===filtroSym);
-    items.sort((a,b)=>new Date(b.tiempo)-new Date(a.tiempo)).forEach(h=>{
+    const desde=$("hist-desde").value;
+    const hasta=$("hist-hasta").value;
+    if(desde) items=items.filter(h=>h.tiempo>=desde);
+    if(hasta) items=items.filter(h=>h.tiempo<=hasta+"T23:59:59");
+    items.sort((a,b)=>new Date(b.tiempo)-new Date(a.tiempo));
+    $("badge-hist").textContent=items.length;
+    if(!items.length){tbody.innerHTML=`<tr><td colspan="6" class="empty">Sin operaciones en el rango</td></tr>`;return;}
+    items.forEach(h=>{
       const tr=document.createElement("tr");
       tr.innerHTML=`<td style="color:#555;font-size:12px">${fmtT(h.tiempo)}</td>
         <td>${h.symbol}</td>
@@ -271,6 +278,10 @@
       tbody.appendChild(tr);
     });
   }
+  window.limpiarFechas = () => {
+    $("hist-desde").value=""; $("hist-hasta").value="";
+    renderHistorial();
+  };
 
   function poblarFiltroSym() {
     const syms=new Set();
@@ -473,7 +484,18 @@ tr:hover td{background:#141414}
       </div>
     </div>
     <div class="panel">
-      <div class="ph"><span class="ptitle">Historial (últimas 50)</span></div>
+      <div class="ph">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="ptitle">Historial</span>
+          <span class="bnum" id="badge-hist">0</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="date" id="hist-desde" oninput="renderHistorial()" style="background:#161616;border:1px solid #222;color:#bbb;padding:4px 8px;border-radius:6px;font-size:11px;cursor:pointer">
+          <span style="color:#444;font-size:11px">—</span>
+          <input type="date" id="hist-hasta" oninput="renderHistorial()" style="background:#161616;border:1px solid #222;color:#bbb;padding:4px 8px;border-radius:6px;font-size:11px;cursor:pointer">
+          <button onclick="limpiarFechas()" style="background:#1a1a1a;border:1px solid #222;color:#555;padding:4px 8px;border-radius:6px;font-size:11px;cursor:pointer">✕</button>
+        </div>
+      </div>
       <div class="twrap">
         <table>
           <thead><tr><th>Fecha</th><th>Símbolo</th><th>Tipo</th><th>Lote</th><th>P&L</th><th>Resultado</th></tr></thead>
